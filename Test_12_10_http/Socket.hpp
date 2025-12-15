@@ -29,13 +29,14 @@ public:
     virtual int SenMessage(const std::string& message) = 0;
 
     virtual void Closefd() = 0;
-
+    virtual void PortReuse() = 0;
 public:
     void TcpServerCreateSocket(uint16_t port)
     {
         CreateSocket();
         ServerBind(port);
         ServerListen();
+ 	PortReuse();
     }
 
     bool TcpClientCreateSocket(std::string& ip, uint16_t port)
@@ -161,6 +162,11 @@ public:
             close(_sockfd);
     }
 
+    void PortReuse() override
+    {
+	int opt = 1;
+        setsockopt(_sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    }
 
     ~TcpSocket()
     {}
