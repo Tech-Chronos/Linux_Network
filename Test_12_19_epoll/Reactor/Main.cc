@@ -1,4 +1,5 @@
 #include "Reactor.hpp"
+#include "Listener.hpp"
 
 
 int main(int argc, char *argv[])
@@ -10,10 +11,16 @@ int main(int argc, char *argv[])
     }
 
     uint16_t port = std::stoi(argv[1]);
+    std::unique_ptr<Listener> listener = std::make_unique<Listener>(port);
 
-    std::unique_ptr<Reactor> select_server = std::make_unique<Reactor>(port);
+    InAddr addr("0", port);
 
+    int listen_sockfd = listener->Init();
     
+    std::unique_ptr<Reactor> R = std::make_unique<Reactor>();
+    R->AddConnection(listen_sockfd, EPOLLIN | EPOLLET, ListenConnection, addr);
+
+    R->Dispatch();
     
     return 0;
 }

@@ -1,6 +1,7 @@
 #pragma once
 #include "Log.hpp"
 #include "InAddr.hpp"
+#include "Common.hpp"
 
 #include <iostream>
 #include <string>
@@ -22,7 +23,7 @@ public:
     virtual void CreateSocket() = 0;
     virtual void ServerBind(uint16_t port) = 0;
     virtual void ServerListen() = 0;
-    virtual SockPtr ServerAccept(InAddr* addr) = 0;
+    virtual SockPtr ServerAccept(InAddr* addr, int* code) = 0;
 
     virtual bool ClientConnect(std::string &ip, uint16_t port) = 0;
 
@@ -64,6 +65,7 @@ public:
             LOG(FATAL, "socket error!");
             exit(-1);
         }
+        SetNonBlock(_sockfd);
         LOG(INFO, "socket successfully, sockfd = %d", _sockfd);
     }
 
@@ -95,7 +97,7 @@ public:
         LOG(INFO, "listen successfully!");
     }
 
-    SockPtr ServerAccept(InAddr* addr) override
+    SockPtr ServerAccept(InAddr* addr, int* code) override
     {
         sockaddr_in client;
         socklen_t len = sizeof(client);
@@ -104,9 +106,11 @@ public:
         if (servicefd < 0)
         {
             LOG(ERROR, "accept error!");
+            *code = errno;
             return nullptr;
         }
 
+        SetNonBlock(servicefd);
         //InAddr client_addr(client);
         *addr = client;
         return std::make_shared<TcpSocket>(servicefd);

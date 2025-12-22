@@ -26,6 +26,11 @@ public:
         ToHost();
     }
 
+    InAddr(std::string ip, uint16_t port)
+        :_ip(ip)
+        ,_port(port)
+    {}
+
     std::string GetIP()
     {
         return _ip;
