@@ -1,7 +1,9 @@
 #pragma once
 #include "Socket.hpp"
-#include "Reactor.hpp"
+#include "Connection.hpp"
+#include <sys/epoll.h>
 
+class Reactor;
 class Listener
 {
 public:
@@ -27,15 +29,25 @@ public:
             if (conn_fd != nullptr)
             {
                 con->_R->AddConnection(conn_fd->GetSockFd(), EPOLLIN | EPOLLET, NormalConnection, addr);
+                LOG(INFO, "add %d to epoll!", conn_fd->GetSockFd());
             }
             else
             {
                 if (code == EWOULDBLOCK)
+                {
+                    LOG(INFO, "已经全部链接完毕");
                     break;
+                }
                 else if (code == EINTR)
+                {
+                    LOG(INFO, "被信号中断");
                     continue;
+                }
                 else
+                {
+                    LOG(ERROR, "accept 错误！");
                     return;
+                }
             }
         }
     }
@@ -48,5 +60,4 @@ private:
     SockPtr _listen_fd;
     int _port;
 
-    Reactor *_R;
 };

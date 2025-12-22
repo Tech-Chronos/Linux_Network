@@ -1,12 +1,12 @@
 #pragma once
-#include "Log.hpp"
-#include "Reactor.hpp"
+#include "InAddr.hpp"
 #include <iostream>
 #include <functional>
 
 #define ListenConnection 0
 #define NormalConnection 1
 
+class Reactor;
 class Connection;
 using handler_t = std::function<void(Connection*)>;
 
@@ -18,6 +18,13 @@ public:
         ,_event(event)
         ,_addr(addr)
     {}
+
+    void RegisterHandler(handler_t recver, handler_t sender, handler_t excepter)
+    {
+        recv_func = recver;
+        send_func = sender;
+        except_func = excepter;
+    }
 
     int GetSockFD()
     {
@@ -42,6 +49,11 @@ public:
     InAddr GetAddr()
     {
         return _addr;
+    }
+
+    void SetReactor(Reactor* R)
+    {
+        _R = R;
     }
 
     ~Connection()

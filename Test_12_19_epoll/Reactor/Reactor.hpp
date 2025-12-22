@@ -1,14 +1,15 @@
 #pragma once
-#include "Log.hpp"
-#include "Socket.hpp"
 #include "Connection.hpp"
 #include "Multiplexing.hpp"
-#include "Listener.hpp"
 #include "HandlerConnection.hpp"
 
 #include <unordered_map>
-
 #include <iostream>
+#include <memory>
+
+
+class Listener;
+class Connection;
 
 const static int gsize = 128;
 
@@ -40,6 +41,9 @@ public:
         // 1.1 设置套接字类型 type
         con->SetType(conn_type);
 
+        // 1.2 设置 this 指针到 Connection 中
+        con->SetReactor(this);
+
         // 2. 将 con 插入到connects
         _connects[sockfd] = con;
 
@@ -50,16 +54,12 @@ public:
             // 如果是 监听 套接字 设置回调函数
             if (con->GetType() == ListenConnection)
             {
-                con->recv_func = std::bind(&Listener::Accept, Listener(con->GetAddr().GetPort()), std::placeholders::_1);
-                con->send_func = nullptr;
-                con->except_func = nullptr;
+                con->RegisterHandler(_OnConnect, nullptr, nullptr);
             }
             // 如果是 普通 套接字 设置回调函数
             else if (con->GetType() == NormalConnection)
             {
-                con->recv_func = std::bind(&HandlerIO::RecvMessage, HandlerIO(), std::placeholders::_1);
-                con->send_func = std::bind(&HandlerIO::SendMessage, HandlerIO(), std::placeholders::_1);
-                con->except_func = std::bind(&HandlerIO::HandleExcept, HandlerIO(), std::placeholders::_1);
+                con->RegisterHandler(_OnRecver, _OnSender, _OnExcepter);
             }
         }
     }
@@ -126,6 +126,17 @@ public:
         return true;
     }
 
+    void SetOnConnect(handler_t OnConnect)
+    {
+        _OnConnect = OnConnect;
+    }
+    void SetOnNormalHandler(handler_t recver, handler_t sender, handler_t excepter)
+    {
+        _OnRecver = recver;
+        _OnSender = sender;
+        _OnExcepter = excepter;
+    }
+
     ~Reactor()
     {
     }
@@ -136,4 +147,12 @@ private:
 
     epoll_event revent[gsize];
     bool _isrunning;
+
+    // Reactor中添加处理socket的方法集合
+    // 1. 处理新连接
+    handler_t _OnConnect;
+    // 2. 处理普通的sockfd，主要是IO处理
+    handler_t _OnRecver;
+    handler_t _OnSender;
+    handler_t _OnExcepter;
 };

@@ -105,7 +105,6 @@ public:
 
         if (servicefd < 0)
         {
-            LOG(ERROR, "accept error!");
             *code = errno;
             return nullptr;
         }

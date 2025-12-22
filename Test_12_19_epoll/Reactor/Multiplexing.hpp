@@ -7,7 +7,7 @@ class Multiplex
 {
 public:
     virtual bool AddEvent(int sockfd, int ev) = 0;
-    virtual int Wait(epoll_event revent[], int maxevent, int timeout = 1000) = 0;
+    virtual int Wait(epoll_event revent[], int maxevent, int timeout = -1) = 0;
 };
 
 class Epoller : public Multiplex
