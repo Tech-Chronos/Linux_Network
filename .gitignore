@@ -1,35 +1,66 @@
-# Prerequisites
-*.d
+############################
+# CLion / JetBrains
+############################
+.idea/
+cmake-build-*/
+*.iml
 
-# Compiled Object files
-*.slo
-*.lo
+############################
+# CMake
+############################
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+############################
+# Build output
+############################
+build/
+out/
+bin/
+lib/
+
+############################
+# Executables & Objects
+############################
 *.o
 *.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
 *.a
-*.lib
-
-# Executables
+*.so
+*.so.*
+*.dylib
 *.exe
 *.out
-*.app
 
-# Vscode
-*.vscode
+############################
+# Debug / Release
+############################
+Debug/
+Release/
+
+############################
+# Logs
+############################
+*.log
+
+############################
+# OS files
+############################
+.DS_Store
+Thumbs.db
+
+############################
+# Vim / editor leftovers
+############################
+*~
+*.swp
+*.swo
+
+############################
+# Core dumps
+############################
+core
+core.*
+
