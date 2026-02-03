@@ -724,7 +724,7 @@ private:
         }
         return false;
     }
-     
+
     int CreateTimerFd()
     {
         int timerfd = timerfd_create(CLOCK_MONOTONIC, 0);
@@ -815,10 +815,10 @@ private:
         _tick = (_tick + 1) % _capacity;
         _wheels[_tick].clear();
     }
+
 public:
     TimerWheel()
-        : _tick(0), _capacity(DEFAULT_WHEEL_NUM), _wheels(_capacity), _timerfd(CreateTimerFd())
-        , _timer_channel(_timerfd, _loop)
+        : _tick(0), _capacity(DEFAULT_WHEEL_NUM), _wheels(_capacity), _timerfd(CreateTimerFd()), _timer_channel(_timerfd, _loop)
     {
         _timer_channel.SetReadCallBack(std::bind(&TimerWheel::OnTimeCallBack, this));
         _timer_channel.EnableRead();
@@ -828,6 +828,7 @@ public:
     void AddTimerTask(uint64_t timerid, int timeout, const OnTimerCallBack &on_time_task);
     void RefreshTimerTask(uint64_t timeid);
     void CancelTimerTask(uint64_t timeid);
+
 private:
     int _tick;
     std::vector<std::vector<PtrTimerTask>> _wheels;
@@ -836,9 +837,8 @@ private:
 
     int _timerfd;
     Channel _timer_channel;
-    EventLoop* _loop;
+    EventLoop *_loop;
 };
-
 
 // 只关心调度，不关心事件是怎么被处理的
 class EventLoop
@@ -1004,8 +1004,146 @@ void TimerWheel::CancelTimerTask(uint64_t timeid)
     _loop->RunInLoop(std::bind(&TimerWheel::CancelTimerInLoop, this, timeid));
 }
 
+class Connection;
+using PtrConnection = std::shared_ptr<Connection>;
 
-class Connection
+// 外部传过来
+using ConnectedCallBack = std::function<void(PtrConnection)>;
+using MessageCallBack = std::function<void(PtrConnection, Buffer *)>;
+using AnyEventCallBack = std::function<void(PtrConnection)>;
+using CloseCallBack = std::function<void(PtrConnection)>;
+using ErrorCallBack = std::function<void(PtrConnection)>;
+
+typedef enum
 {
+    CONNECTING,
+    CONNECTED,
+    DISCONNECTING,
+    DISCONNECTED
+} STATUS;
 
+class Connection : public std::enable_shared_from_this<Connection>
+{
+private:
+    // Handle Read 只负责读取数据，然后调用回调函数进行处理
+    void HandleRead()
+    {
+        // 用socket接收数据
+        char buff[65535] = {0};
+        int ret = _socket.RecvNonBlock(buff, sizeof(buff));
+        if (ret == -1)
+        {
+            // 出错了，不能直接关闭链接，要先处理缓冲区中的数据
+            ShutDownInLoop();
+        }
+        // 放到buffer缓冲区中
+        _in_buffer.WriteAndPush(buff, ret);
+        if (_in_buffer.GetReadableNum() > 0)
+        {
+            // 防止在message_cb中销毁这个Connection指针，造成对也指针的访问，因此要用
+            if (_message_cb)
+                _message_cb(shared_from_this(), &_in_buffer);
+        }
+    }
+
+    void HandleWrite()
+    {
+        // 当文件描述符触发写事件的时候，调用这个函数
+        // 准确来说是OnMessage处理完成之后放到发送缓冲区
+        if (_out_buffer.GetReadableNum() > 0)
+        {
+            int ret = _socket.SendNonBlock(_out_buffer.ReadPosition(), _out_buffer.GetReadableNum());
+            if (ret < 0)
+            {
+                if (_in_buffer.GetReadableNum() > 0)
+                {
+                    if (_message_cb)
+                    {
+                        _message_cb(shared_from_this(), &_in_buffer);
+                    }
+                }
+                return Release(); // 真正的关闭链接
+            }
+            _out_buffer.MoveReadOffset(_out_buffer.GetReadableNum());
+            if (_out_buffer.GetReadableNum() > 0)
+            {
+                _channel.DisableWrite();
+                if (_status == DISCONNECTING)
+                {
+                    _status = DISCONNECTED;
+                    return Release();
+                }
+            }
+        }
+    }
+
+    void HandleClose()
+    {
+        if (_in_buffer.GetReadableNum() > 0)
+        {
+            if (_message_cb)
+            {
+                _message_cb(shared_from_this(), &_in_buffer);
+            }
+        }
+        _channel.DisableAll();
+        Release();
+    }
+
+    void HandleError()
+    {
+        return HandleClose();
+    }
+
+    
+
+public:
+    Connection(EventLoop *loop, int sockfd)
+        : _loop(loop), _status(CONNECTING), _sockfd(sockfd), _channel(_sockfd, _loop), _socket(_sockfd)
+    {
+    }
+
+    // 外部设置五种回调函数
+    void SetConnectedCallBack(const ConnectedCallBack &cb)
+    {
+        _conn_cb = cb;
+    }
+
+    void SetMessageCallBack(const MessageCallBack &cb)
+    {
+        _message_cb = cb;
+    }
+
+    void SetAnyEventCallBack(const AnyEventCallBack &cb)
+    {
+        _event_cb = cb;
+    }
+
+    void SetCloseCallBack(const CloseCallBack &cb)
+    {
+        _close_cb = cb;
+    }
+
+    void SetErrorCallBack(const ErrorCallBack &cb)
+    {
+        _error_cb = cb;
+    }
+
+private:
+    EventLoop *_loop;
+    STATUS _status;
+
+    ConnectedCallBack _conn_cb;
+    MessageCallBack _message_cb;
+    AnyEventCallBack _event_cb;
+    CloseCallBack _close_cb;
+    ErrorCallBack _error_cb;
+
+    // 每个链接都要有自己的缓冲区
+    Buffer _in_buffer;
+    Buffer _out_buffer;
+
+    int _sockfd;
+    Channel _channel;
+    Socket _socket;
 };
