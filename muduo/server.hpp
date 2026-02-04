@@ -417,7 +417,7 @@ class Poller;
 class EventLoop;
 class Channel
 {
-private:
+public:
     void Update();
 
     void Remove();
@@ -715,16 +715,6 @@ private:
         }
     }
 
-    bool HasTimer(uint64_t timerid)
-    {
-        auto it = _timers.find(timerid);
-        if (it != _timers.end())
-        {
-            return true;
-        }
-        return false;
-    }
-
     int CreateTimerFd()
     {
         int timerfd = timerfd_create(CLOCK_MONOTONIC, 0);
@@ -817,8 +807,8 @@ private:
     }
 
 public:
-    TimerWheel()
-        : _tick(0), _capacity(DEFAULT_WHEEL_NUM), _wheels(_capacity), _timerfd(CreateTimerFd()), _timer_channel(_timerfd, _loop)
+    TimerWheel(EventLoop* loop)
+        : _tick(0), _capacity(DEFAULT_WHEEL_NUM), _wheels(_capacity), _timerfd(CreateTimerFd()), _timer_channel(_timerfd, _loop), _loop(loop)
     {
         _timer_channel.SetReadCallBack(std::bind(&TimerWheel::OnTimeCallBack, this));
         _timer_channel.EnableRead();
@@ -828,6 +818,16 @@ public:
     void AddTimerTask(uint64_t timerid, int timeout, const OnTimerCallBack &on_time_task);
     void RefreshTimerTask(uint64_t timeid);
     void CancelTimerTask(uint64_t timeid);
+
+    bool HasTimer(uint64_t timerid)
+    {
+        auto it = _timers.find(timerid);
+        if (it != _timers.end())
+        {
+            return true;
+        }
+        return false;
+    }
 
 private:
     int _tick;
@@ -906,7 +906,7 @@ private:
 
 public:
     EventLoop()
-        : _isrunning(false), _thread_id(std::this_thread::get_id()), _task_pool(32), _eventfd(CreateEventFd()), _event_channel(_eventfd, this)
+        : _isrunning(false), _thread_id(std::this_thread::get_id()), _task_pool(32), _eventfd(CreateEventFd()), _event_channel(_eventfd, this), _timer_wheel(this)
     {
         // 设置eventfd的可读回调
         _event_channel.SetReadCallBack(std::bind(&EventLoop::ReadEventFd, this));
@@ -965,6 +965,25 @@ public:
         _poller.RemoveEvent(channel);
     }
 
+    void AddTimerTask(uint64_t timerid, uint32_t timeout, const OnTimerCallBack &on_time_task)
+    {
+        _timer_wheel.AddTimerTask(timerid, timeout, on_time_task);
+    }
+
+    void RefreshTimerTask(uint64_t timerid)
+    {
+        _timer_wheel.RefreshTimerTask(timerid);
+    }
+
+    void CancelTimerTask(uint64_t timerid)
+    {
+        _timer_wheel.CancelTimerTask(timerid);
+    }
+
+    bool HasTimer(uint64_t timerid)
+    {
+        _timer_wheel.HasTimer(timerid);
+    }
 private:
     bool _isrunning;
     Poller _poller;
@@ -976,6 +995,8 @@ private:
     Channel _event_channel;
 
     std::thread::id _thread_id;
+
+    TimerWheel _timer_wheel;
 };
 
 void Channel::Update()
@@ -1095,12 +1116,65 @@ private:
         return HandleClose();
     }
 
-    
+    void HandleAnyEvent()
+    {
+        if (_enable_inactive_release)
+            _loop->RefreshTimerTask(_timer_id);
+        if (_event_cb)
+            _event_cb(shared_from_this());
+    }
+
+    void EstablishedInLoop()
+    {
+        assert(_status == CONNECTING);
+        _status = CONNECTED;
+        _channel.EnableRead();
+        if (_conn_cb)
+            _conn_cb(shared_from_this());
+    }
+
+    void ReleaseInLoop()
+    {
+        _status = DISCONNECTED;
+        _channel.Remove();
+        _socket.Close();
+
+        if (_loop->HasTimer(_timer_id))
+        {
+            _loop->CancelTimerTask(_timer_id);
+        }
+
+        if (_close_cb)
+            _close_cb(shared_from_this());
+        if (_server_close_cb)
+            _server_close_cb(shared_from_this());
+    }
+
+    void EstablishedInLoop()
+    {
+        assert(_status == CONNECTING);
+        _status = CONNECTED;
+        _channel.EnableRead();
+
+        if (_conn_cb)
+            _conn_cb(shared_from_this());
+    }
+
+    void ReleaseInLoop()
+    {
+        
+    }
 
 public:
-    Connection(EventLoop *loop, int sockfd)
-        : _loop(loop), _status(CONNECTING), _sockfd(sockfd), _channel(_sockfd, _loop), _socket(_sockfd)
+    Connection(EventLoop *loop, int sockfd, uint64_t timerid, uint64_t connid)
+        : _loop(loop), _status(CONNECTING), _sockfd(sockfd), _channel(_sockfd, _loop)
+        , _socket(_sockfd), _timer_id(timerid), _conn_id(connid)
     {
+        _channel.SetReadCallBack(std::bind(&Connection::HandleRead, this));
+        _channel.SetWriteCallBack(std::bind(&Connection::HandleWrite,this));
+        _channel.SetCloseCallBack(std::bind(&Connection::HandleClose, this));
+        _channel.SetErrorCallBack(std::bind(&Connection::HandleError, this));
+        _channel.SetAnyCallBack(std::bind(&Connection::HandleAnyEvent, this));
     }
 
     // 外部设置五种回调函数
@@ -1129,6 +1203,11 @@ public:
         _error_cb = cb;
     }
 
+    void SetServerCloseCallBack(const CloseCallBack &cb)
+    {
+        _server_close_cb = cb;
+    }
+
 private:
     EventLoop *_loop;
     STATUS _status;
@@ -1137,6 +1216,7 @@ private:
     MessageCallBack _message_cb;
     AnyEventCallBack _event_cb;
     CloseCallBack _close_cb;
+    CloseCallBack _server_close_cb;
     ErrorCallBack _error_cb;
 
     // 每个链接都要有自己的缓冲区
@@ -1146,4 +1226,9 @@ private:
     int _sockfd;
     Channel _channel;
     Socket _socket;
+
+    bool _enable_inactive_release;
+
+    uint64_t _conn_id;
+    uint64_t _timer_id;
 };
