@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <functional>
 #include <mutex>
+#include <condition_variable>
 #include <thread>
 #include <memory>
 
@@ -807,7 +808,7 @@ private:
     }
 
 public:
-    TimerWheel(EventLoop* loop)
+    TimerWheel(EventLoop *loop)
         : _tick(0), _capacity(DEFAULT_WHEEL_NUM), _wheels(_capacity), _timerfd(CreateTimerFd()), _timer_channel(_timerfd, _loop), _loop(loop)
     {
         _timer_channel.SetReadCallBack(std::bind(&TimerWheel::OnTimeCallBack, this));
@@ -982,8 +983,9 @@ public:
 
     bool HasTimer(uint64_t timerid)
     {
-        _timer_wheel.HasTimer(timerid);
+        return _timer_wheel.HasTimer(timerid);
     }
+
 private:
     bool _isrunning;
     Poller _poller;
@@ -1009,6 +1011,90 @@ void Channel::Remove()
     _loop->RemoveEvent(this);
 }
 
+class LoopThread
+{
+private:
+    void ThreadEntry()
+    {
+        EventLoop loop;
+        {
+            std::unique_lock<std::mutex> lock;
+            _loop = &loop;
+            _cond.notify_all();
+        }
+        loop.Start();
+    }
+
+public:
+    LoopThread()
+        : _loop(nullptr)
+        , _thread(&LoopThread::ThreadEntry, this)
+    {
+    }
+
+    EventLoop *GetLoop()
+    {
+        EventLoop* loop;
+        {
+            std::unique_lock<std::mutex> lock(_mtx);
+            _cond.wait(lock, [&](){ return _loop != nullptr; });
+            loop = _loop;
+        }
+        return loop;
+    }
+
+private:
+    std::mutex _mtx;
+    std::condition_variable _cond;
+    EventLoop *_loop;
+    std::thread _thread;
+};
+
+class LoopThreadPool
+{
+public:
+    LoopThreadPool(EventLoop* baseloop)
+        : _baseloop(baseloop)
+        , _thread_count(0)
+        , _next_idx(0)
+    {}
+
+    void SetThreadCount(int thread_count)
+    {
+        _thread_count = thread_count;
+    }
+
+    void Create()
+    {
+        if (_thread_count == 0) return;
+        _threads.resize(_thread_count);
+        _loops.resize(_thread_count);
+        for (int i = 0; i < _threads.size(); ++i)
+        {
+            _threads[i] = new LoopThread();
+            _loops[i] = _threads[i]->GetLoop();
+        }
+    }
+
+    EventLoop* NextLoop()
+    {
+        if (_thread_count == 0)
+        {
+            return _baseloop;
+        }
+        _next_idx = (_next_idx + 1) % _thread_count;
+        return _loops[_next_idx];
+    }
+
+private:
+    std::vector<LoopThread*> _threads;
+    std::vector<EventLoop*> _loops;
+    EventLoop* _baseloop;
+    int _thread_count;
+
+    int _next_idx;
+};
+
 // 防止业务线程和自己的线程在并发处理_timers 或者 _wheels，因此在自己的loop线程中放到任务池中
 void TimerWheel::AddTimerTask(uint64_t timerid, int timeout, const OnTimerCallBack &on_time_task)
 {
@@ -1028,21 +1114,92 @@ void TimerWheel::CancelTimerTask(uint64_t timeid)
 class Any
 {
 public:
-    template <class T>
     class Holder
     {
     public:
-        virtual ~Holder();
+        virtual ~Holder() = 0;
+        virtual const std::type_info &type() = 0;
+        virtual Holder *clone() = 0;
     };
 
     template <class T>
     class PlaceHolder : public Holder
     {
     public:
+        PlaceHolder(const T &val)
+            : _val(val)
+        {
+        }
 
-    private:
-        
+        const std::type_info &type()
+        {
+            return typeid(T);
+        }
+
+        Holder *clone()
+        {
+            return new PlaceHolder<T>(_val);
+        }
+
+    public:
+        T _val;
     };
+
+public:
+    Any()
+        : _holder(nullptr)
+    {
+    }
+
+    template <class T>
+    Any(const T &val)
+    {
+        _holder = new PlaceHolder<T>(val);
+    }
+
+    Any(const Any &other)
+    {
+        if (other._holder == nullptr)
+            _holder = nullptr;
+        else
+        {
+            _holder = other._holder->clone();
+        }
+    }
+
+    const std::type_info &type()
+    {
+        return (_holder ? _holder->type() : typeid(void));
+    }
+
+    Any &swap(Any &other)
+    {
+        std::swap(_holder, other._holder);
+        return *this;
+    }
+
+    template <class T>
+    T *GetVal()
+    {
+        return &((PlaceHolder<T> *)_holder)->_val;
+    }
+
+    // 赋值重载
+    template <class T>
+    Any &operator=(const T &val)
+    {
+        Any(val).swap(*this);
+        return *this;
+    }
+
+    Any &operator=(Any other)
+    {
+        other.swap(*this);
+        return *this;
+    }
+
+private:
+    Holder *_holder;
 };
 
 class Connection;
@@ -1106,7 +1263,7 @@ private:
                 return Release(); // 真正的关闭链接
             }
             _out_buffer.MoveReadOffset(_out_buffer.GetReadableNum());
-            if (_out_buffer.GetReadableNum() > 0)
+            if (_out_buffer.GetReadableNum() == 0)
             {
                 _channel.DisableWrite();
                 if (_status == DISCONNECTING)
@@ -1170,19 +1327,10 @@ private:
             _server_close_cb(shared_from_this());
     }
 
-    void EstablishedInLoop()
+    void SendInLoop(Buffer &buf)
     {
-        assert(_status == CONNECTING);
-        _status = CONNECTED;
-        _channel.EnableRead();
-
-        if (_conn_cb)
-            _conn_cb(shared_from_this());
-    }
-
-    void SendInLoop(Buffer& buf)
-    {
-        if (_status == DISCONNECTED) return;
+        if (_status == DISCONNECTED)
+            return;
         _out_buffer.WriteBufferAndPush(buf);
         if (!_channel.WriteAble())
             _channel.EnableWrite();
@@ -1203,17 +1351,17 @@ private:
         }
         if (_out_buffer.GetReadableNum() == 0)
             Release();
-    }   
+    }
 
-    void EnableInactiveReleaseInLoop()
+    void EnableInactiveReleaseInLoop(int sec)
     {
         _enable_inactive_release = true;
         if (_loop->HasTimer(_timer_id))
             _loop->RefreshTimerTask(_timer_id);
         else
-            _loop->AddTimerTask(_timer_id, std::bind(&Connection::Release, this));
-    }  
-    
+            _loop->AddTimerTask(_timer_id, sec, std::bind(&Connection::Release, this));
+    }
+
     void CancelInactiveReleaseInLoop()
     {
         _enable_inactive_release = false;
@@ -1221,13 +1369,25 @@ private:
             _loop->CancelTimerTask(_timer_id);
     }
 
+    void UpgradeInLoop(const Any &context, const ConnectedCallBack &conn_cb,
+                       const MessageCallBack &message_cb, const AnyEventCallBack &event_cb,
+                       const CloseCallBack &close_cb, const ErrorCallBack &error_cb, const CloseCallBack &server_close_cb)
+    {
+        _context = context;
+        _conn_cb = conn_cb;
+        _message_cb = message_cb;
+        _event_cb = event_cb;
+        _close_cb = close_cb;
+        _error_cb = error_cb;
+        _server_close_cb = server_close_cb;
+    }
+
 public:
     Connection(EventLoop *loop, int sockfd, uint64_t timerid, uint64_t connid)
-        : _loop(loop), _status(CONNECTING), _sockfd(sockfd), _channel(_sockfd, _loop)
-        , _socket(_sockfd), _timer_id(timerid), _conn_id(connid)
+        : _loop(loop), _status(CONNECTING), _sockfd(sockfd), _channel(_sockfd, _loop), _socket(_sockfd), _timer_id(timerid), _conn_id(connid), _enable_inactive_release(false)
     {
         _channel.SetReadCallBack(std::bind(&Connection::HandleRead, this));
-        _channel.SetWriteCallBack(std::bind(&Connection::HandleWrite,this));
+        _channel.SetWriteCallBack(std::bind(&Connection::HandleWrite, this));
         _channel.SetCloseCallBack(std::bind(&Connection::HandleClose, this));
         _channel.SetErrorCallBack(std::bind(&Connection::HandleError, this));
         _channel.SetAnyCallBack(std::bind(&Connection::HandleAnyEvent, this));
@@ -1264,6 +1424,70 @@ public:
         _server_close_cb = cb;
     }
 
+    ~Connection()
+    {
+        DBG_LOG("Connection Released:%p", this);
+    }
+
+    int Fd()
+    {
+        return _sockfd;
+    }
+
+    int ConnId()
+    {
+        return _conn_id;
+    }
+
+    int TimerId()
+    {
+        return _timer_id;
+    }
+
+    void SetContext(const Any &context)
+    {
+        _context = context;
+    }
+
+    void Established()
+    {
+        _loop->RunInLoop(std::bind(&Connection::EstablishedInLoop, this));
+    }
+
+    void Send(const char *data, size_t len)
+    {
+        Buffer buf;
+        buf.WriteAndPush(data, len);
+        _loop->RunInLoop(std::bind(&Connection::SendInLoop, this, buf));
+    }
+
+    void ShutDown()
+    {
+        _loop->RunInLoop(std::bind(&Connection::ShutDownInLoop, this));
+    }
+
+    void Release()
+    {
+        _loop->RunInLoop(std::bind(&Connection::ReleaseInLoop, this));
+    }
+
+    void EnableInactiveRelease(int sec)
+    {
+        _loop->RunInLoop(std::bind(&Connection::EnableInactiveReleaseInLoop, this, sec));
+    }
+
+    void CancelInactiveRelease()
+    {
+        _loop->RunInLoop(std::bind(&Connection::CancelInactiveReleaseInLoop, this));
+    }
+
+    void Upgrade(const Any &context, const ConnectedCallBack &conn_cb,
+                 const MessageCallBack &message_cb, const AnyEventCallBack &event_cb,
+                 const CloseCallBack &close_cb, const ErrorCallBack &error_cb, const CloseCallBack &server_close_cb)
+    {
+        _loop->RunInLoop(std::bind(&Connection::UpgradeInLoop, this, context, conn_cb, message_cb, event_cb, close_cb, error_cb, server_close_cb));
+    }
+
 private:
     EventLoop *_loop;
     STATUS _status;
@@ -1287,4 +1511,6 @@ private:
 
     uint64_t _conn_id;
     uint64_t _timer_id;
+
+    Any _context;
 };
