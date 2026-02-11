@@ -290,7 +290,7 @@ public:
         return true;
     }
 
-    bool Accept()
+    int Accept()
     {
         int io_fd = accept(_sockfd, nullptr, nullptr);
         if (io_fd < 0)
@@ -298,7 +298,7 @@ public:
             ERR_LOG("accept error!");
             return false;
         }
-        return true;
+        return io_fd;
     }
 
     bool Connection(const std::string &ip, uint16_t port)
@@ -367,7 +367,7 @@ public:
     }
 
     // ip一般绑定所有的网卡
-    bool CreateServer(uint16_t port, const std::string &ip = INADDR_ANY, int block_flag = false)
+    int CreateServer(uint16_t port, const std::string &ip = INADDR_ANY, int block_flag = false)
     {
         if (CreateSocket() == false)
             return false;
@@ -380,7 +380,7 @@ public:
             return false;
         if (Listen() == false)
             return false;
-        return true;
+        return _sockfd;
     }
 
     // 客户端不要绑定自己的端口
@@ -1091,7 +1091,6 @@ private:
     std::vector<EventLoop*> _loops;
     EventLoop* _baseloop;
     int _thread_count;
-
     int _next_idx;
 };
 
@@ -1513,4 +1512,166 @@ private:
     uint64_t _timer_id;
 
     Any _context;
+};
+
+using AcceptCallBack = std::function<void()>;
+class Acceptor
+{
+private:
+    int ServerInit()
+    {
+        int ret = _socket.CreateServer(_port);
+        return ret;
+        if (_accept_cb)
+            _accept_cb();
+    }
+
+    void HandlerNewConnection()
+    {
+        int io_fd = _socket.Accept();
+        if (io_fd < 0)
+            return ;
+    }
+
+public:
+    Acceptor(uint16_t port, EventLoop* base_loop)
+        : _port(port)
+        , _fd(ServerInit())
+        , _channel(_fd, _base_loop)
+        , _base_loop(base_loop)
+    {
+        _channel.SetReadCallBack(std::bind(&Acceptor::HandlerNewConnection, this));
+    }
+
+    void Established()
+    {
+        _channel.EnableRead();
+    }
+
+    void SetAcceptCallBack(const AcceptCallBack& accept_cb)
+    {
+        _accept_cb = accept_cb;
+    }
+
+    int Fd()
+    {
+        return _fd;
+    }
+
+private:
+    uint16_t _port;
+    Socket _socket;
+    int _fd;
+    Channel _channel;
+    EventLoop* _base_loop;
+    AcceptCallBack _accept_cb;
+};
+
+
+class TcpServer
+{
+private:
+    void OnAccept()
+    {
+        EventLoop* nextloop = _pool.NextLoop();
+        Channel io_channel(_accept.Fd(), nextloop);
+        PtrConnection newconn = std::make_shared<Connection>(nextloop, _accept.Fd(), _timer_id, _conn_id);
+        
+        newconn->SetConnectedCallBack(_conn_cb);
+        newconn->SetMessageCallBack(_message_cb);
+        newconn->SetAnyEventCallBack(_any_cb);
+        newconn->SetCloseCallBack(_close_cb);
+        newconn->SetErrorCallBack(_error_cb);
+        //newconn->SetServerCloseCallBack(std::bind(&TcpServer::ServerClose, this, std::placeholders::_1));
+        newconn->EnableInactiveRelease(_timeout);
+        newconn->Established();
+
+        _conn_map.insert(std::make_pair(_conn_id, newconn));
+        _conn_id++;
+        _timer_id++;
+    }
+
+    void ServerClose(int conn_id)
+    {
+        auto it = _conn_map.find(conn_id);
+        if (it != _conn_map.end())
+        {
+            _conn_map.erase(it);
+        }
+        return;
+    }
+public:
+    TcpServer(int port)
+        : _port(port)
+        , _thread_count(0)
+        , _enable_inactive_release(true)
+        , _conn_id(0)
+        , _timer_id(0)
+        , _accept(port, &_base_loop)
+        , _pool(&_base_loop)
+    {
+        _accept.SetAcceptCallBack(std::bind(&TcpServer::OnAccept, this));
+        _accept.Established();
+    }
+
+    void SetConnectionCallBack(const ConnectedCallBack& cb)
+    {
+        _conn_cb = cb;
+    }
+
+    void SetMessageCallBack(const MessageCallBack& cb)
+    {
+        _message_cb = cb;
+    }
+
+    void SetErrorCallBack(const ErrorCallBack& cb)
+    {
+        _error_cb = cb;
+    }
+
+    void SetCloseCallBack(const CloseCallBack& cb)
+    {
+        _close_cb = cb;
+    }
+
+    void SetEventCallBack(const AnyEventCallBack& cb)
+    {
+        _any_cb = cb;
+    }
+
+    void SetServerCloseCallBack(const CloseCallBack& cb)
+    {
+        _server_close_cb = cb;
+    }
+
+    void SetThreadCountAndCreate(int thread_count)
+    {
+        _thread_count = thread_count;
+        _pool.Create();
+    }
+    
+    void Start()
+    {
+        //_accept.Established();
+        _base_loop.Start();
+    }
+
+private:
+    bool _enable_inactive_release;
+    int _timeout;
+    int _port;
+    int _thread_count;
+    EventLoop _base_loop;
+    LoopThreadPool _pool;
+    int _conn_id;
+    int _timer_id;
+    std::unordered_map<uint64_t, PtrConnection> _conn_map;
+    Acceptor _accept;
+
+    ConnectedCallBack _conn_cb;
+    MessageCallBack _message_cb;
+    ErrorCallBack _error_cb;
+    CloseCallBack _close_cb;
+    AnyEventCallBack _any_cb;
+    CloseCallBack _server_close_cb;
 };
